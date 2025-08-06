@@ -11,6 +11,25 @@ import { Switch } from "@heroui/switch";
 import { Alert } from "@heroui/alert";
 import { Accordion, AccordionItem } from "@heroui/accordion";
 import toast from 'react-hot-toast';
+import {
+  DndContext,
+  closestCenter,
+  KeyboardSensor,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  arrayMove,
+  SortableContext,
+  sortableKeyboardCoordinates,
+  rectSortingStrategy,
+} from '@dnd-kit/sortable';
+import {
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 import AdminLayout from "@/layouts/admin";
 import { 
@@ -22,8 +41,10 @@ import {
   userTunnel, 
   pauseForwardService,
   resumeForwardService,
-  diagnoseForward
+  diagnoseForward,
+  updateForwardOrder
 } from "@/api";
+import { JwtUtil } from "@/utils/jwt";
 
 interface Forward {
   id: number;
@@ -41,6 +62,7 @@ interface Forward {
   createdTime: string;
   userName?: string;
   userId?: number;
+  inx?: number;
 }
 
 interface Tunnel {
@@ -100,6 +122,20 @@ export default function ForwardPage() {
   const [forwards, setForwards] = useState<Forward[]>([]);
   const [tunnels, setTunnels] = useState<Tunnel[]>([]);
   
+  // 检测是否为移动端
+  const [isMobile, setIsMobile] = useState(false);
+  
+  useEffect(() => {
+    const checkMobile = () => {
+      setIsMobile(window.innerWidth < 768);
+    };
+    
+    checkMobile();
+    window.addEventListener('resize', checkMobile);
+    
+    return () => window.removeEventListener('resize', checkMobile);
+  }, []);
+  
   // 显示模式状态 - 从localStorage读取，默认为分类显示
   const [viewMode, setViewMode] = useState<'grouped' | 'direct'>(() => {
     try {
@@ -109,6 +145,9 @@ export default function ForwardPage() {
       return 'grouped';
     }
   });
+  
+  // 拖拽排序相关状态
+  const [forwardOrder, setForwardOrder] = useState<number[]>([]);
   
   // 模态框状态
   const [modalOpen, setModalOpen] = useState(false);
@@ -166,6 +205,55 @@ export default function ForwardPage() {
     setViewMode(newMode);
     try {
       localStorage.setItem('forward-view-mode', newMode);
+      
+      // 切换到直接显示模式时，初始化拖拽排序顺序
+      if (newMode === 'direct') {
+        // 在平铺模式下，只对当前用户的转发进行排序
+        const currentUserId = JwtUtil.getUserIdFromToken();
+        let userForwards = forwards;
+        if (currentUserId !== null) {
+          userForwards = forwards.filter((f: Forward) => f.userId === currentUserId);
+        }
+        
+        // 检查数据库中是否有排序信息
+        const hasDbOrdering = userForwards.some((f: Forward) => f.inx !== undefined && f.inx !== 0);
+        
+        if (hasDbOrdering) {
+          // 使用数据库中的排序信息
+          const dbOrder = userForwards
+            .sort((a: Forward, b: Forward) => (a.inx ?? 0) - (b.inx ?? 0))
+            .map((f: Forward) => f.id);
+          setForwardOrder(dbOrder);
+          
+          // 同步到localStorage
+          try {
+            localStorage.setItem('forward-order', JSON.stringify(dbOrder));
+          } catch (error) {
+            console.warn('无法保存排序到localStorage:', error);
+          }
+        } else {
+          // 使用本地存储的顺序
+          const savedOrder = localStorage.getItem('forward-order');
+          if (savedOrder) {
+            try {
+              const orderIds = JSON.parse(savedOrder);
+              const validOrder = orderIds.filter((id: number) => 
+                userForwards.some((f: Forward) => f.id === id)
+              );
+              userForwards.forEach((forward: Forward) => {
+                if (!validOrder.includes(forward.id)) {
+                  validOrder.push(forward.id);
+                }
+              });
+              setForwardOrder(validOrder);
+            } catch {
+              setForwardOrder(userForwards.map((f: Forward) => f.id));
+            }
+          } else {
+            setForwardOrder(userForwards.map((f: Forward) => f.id));
+          }
+        }
+      }
     } catch (error) {
       console.warn('无法保存显示模式到localStorage:', error);
     }
@@ -181,10 +269,62 @@ export default function ForwardPage() {
       ]);
       
       if (forwardsRes.code === 0) {
-        setForwards(forwardsRes.data?.map((forward: any) => ({
+        const forwardsData = forwardsRes.data?.map((forward: any) => ({
           ...forward,
           serviceRunning: forward.status === 1
-        })) || []);
+        })) || [];
+        setForwards(forwardsData);
+        
+        // 初始化拖拽排序顺序
+        if (viewMode === 'direct') {
+          // 在平铺模式下，只对当前用户的转发进行排序
+          const currentUserId = JwtUtil.getUserIdFromToken();
+          let userForwards = forwardsData;
+          if (currentUserId !== null) {
+            userForwards = forwardsData.filter((f: Forward) => f.userId === currentUserId);
+          }
+          
+          // 检查数据库中是否有排序信息
+          const hasDbOrdering = userForwards.some((f: Forward) => f.inx !== undefined && f.inx !== 0);
+          
+          if (hasDbOrdering) {
+            // 使用数据库中的排序信息
+            const dbOrder = userForwards
+              .sort((a: Forward, b: Forward) => (a.inx ?? 0) - (b.inx ?? 0))
+              .map((f: Forward) => f.id);
+            setForwardOrder(dbOrder);
+            
+            // 同步到localStorage
+            try {
+              localStorage.setItem('forward-order', JSON.stringify(dbOrder));
+            } catch (error) {
+              console.warn('无法保存排序到localStorage:', error);
+            }
+          } else {
+            // 使用本地存储的顺序
+            const savedOrder = localStorage.getItem('forward-order');
+            if (savedOrder) {
+              try {
+                const orderIds = JSON.parse(savedOrder);
+                // 验证保存的顺序是否仍然有效（只包含当前用户的转发）
+                const validOrder = orderIds.filter((id: number) => 
+                  userForwards.some((f: Forward) => f.id === id)
+                );
+                // 添加新的转发ID（如果存在）
+                userForwards.forEach((forward: Forward) => {
+                  if (!validOrder.includes(forward.id)) {
+                    validOrder.push(forward.id);
+                  }
+                });
+                setForwardOrder(validOrder);
+              } catch {
+                setForwardOrder(userForwards.map((f: Forward) => f.id));
+              }
+            } else {
+              setForwardOrder(userForwards.map((f: Forward) => f.id));
+            }
+          }
+        }
       } else {
         toast.error(forwardsRes.msg || '获取转发列表失败');
       }
@@ -206,7 +346,10 @@ export default function ForwardPage() {
   const groupForwardsByUserAndTunnel = (): UserGroup[] => {
     const userMap = new Map<string, UserGroup>();
     
-    forwards.forEach(forward => {
+    // 获取排序后的转发列表
+    const sortedForwards = getSortedForwards();
+    
+    sortedForwards.forEach(forward => {
       const userKey = forward.userId ? forward.userId.toString() : 'unknown';
       const userName = forward.userName || '未知用户';
       
@@ -687,7 +830,7 @@ export default function ForwardPage() {
         );
       } else {
         // 直接显示模式下，过滤指定隧道的转发
-        forwardsToExport = forwards.filter(forward => forward.tunnelId === selectedTunnelForExport);
+        forwardsToExport = getSortedForwards().filter(forward => forward.tunnelId === selectedTunnelForExport);
       }
       
       if (forwardsToExport.length === 0) {
@@ -876,13 +1019,159 @@ export default function ForwardPage() {
     return addresses.length;
   };
 
+  // 处理拖拽结束
+  const handleDragEnd = async (event: DragEndEvent) => {
+    const { active, over } = event;
+    
+    if (!active || !over || active.id === over.id) return;
+    
+    // 确保 forwardOrder 存在且有效
+    if (!forwardOrder || forwardOrder.length === 0) return;
+    
+    const activeId = Number(active.id);
+    const overId = Number(over.id);
+    
+    // 检查 ID 是否有效
+    if (isNaN(activeId) || isNaN(overId)) return;
+    
+    const oldIndex = forwardOrder.indexOf(activeId);
+    const newIndex = forwardOrder.indexOf(overId);
+    
+    if (oldIndex !== -1 && newIndex !== -1 && oldIndex !== newIndex) {
+      const newOrder = arrayMove(forwardOrder, oldIndex, newIndex);
+      setForwardOrder(newOrder);
+      
+      // 保存到localStorage
+      try {
+        localStorage.setItem('forward-order', JSON.stringify(newOrder));
+      } catch (error) {
+        console.warn('无法保存排序到localStorage:', error);
+      }
+      
+      // 持久化到数据库
+      try {
+        const forwardsToUpdate = newOrder.map((id, index) => ({
+          id,
+          inx: index
+        }));
+        
+        const response = await updateForwardOrder({ forwards: forwardsToUpdate });
+        if (response.code === 0) {
+          // 更新本地数据中的 inx 字段
+          setForwards(prev => prev.map(forward => {
+            const updatedForward = forwardsToUpdate.find(f => f.id === forward.id);
+            if (updatedForward) {
+              return { ...forward, inx: updatedForward.inx };
+            }
+            return forward;
+          }));
+        } else {
+          toast.error('保存排序失败：' + (response.msg || '未知错误'));
+        }
+      } catch (error) {
+        console.error('保存排序到数据库失败:', error);
+        toast.error('保存排序失败，请重试');
+      }
+    }
+  };
+
+  // 传感器配置 - 使用默认配置避免错误
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    })
+  );
+
+  // 根据排序顺序获取转发列表
+  const getSortedForwards = (): Forward[] => {
+    // 确保 forwards 数组存在且有效
+    if (!forwards || forwards.length === 0) {
+      return [];
+    }
+    
+    // 在平铺模式下，只显示当前用户的转发
+    let filteredForwards = forwards;
+    if (viewMode === 'direct') {
+      const currentUserId = JwtUtil.getUserIdFromToken();
+      if (currentUserId !== null) {
+        filteredForwards = forwards.filter(forward => forward.userId === currentUserId);
+      }
+    }
+    
+    // 确保过滤后的转发列表有效
+    if (!filteredForwards || filteredForwards.length === 0) {
+      return [];
+    }
+    
+    // 优先使用数据库中的 inx 字段进行排序
+    const sortedForwards = [...filteredForwards].sort((a, b) => {
+      const aInx = a.inx ?? 0;
+      const bInx = b.inx ?? 0;
+      return aInx - bInx;
+    });
+    
+    // 如果数据库中没有排序信息，则使用本地存储的顺序
+    if (forwardOrder && forwardOrder.length > 0 && sortedForwards.every(f => f.inx === undefined || f.inx === 0)) {
+      const forwardMap = new Map(filteredForwards.map(f => [f.id, f]));
+      const localSortedForwards: Forward[] = [];
+      
+      forwardOrder.forEach(id => {
+        const forward = forwardMap.get(id);
+        if (forward) {
+          localSortedForwards.push(forward);
+        }
+      });
+      
+      // 添加不在排序列表中的转发（新添加的）
+      filteredForwards.forEach(forward => {
+        if (!forwardOrder.includes(forward.id)) {
+          localSortedForwards.push(forward);
+        }
+      });
+      
+      return localSortedForwards;
+    }
+    
+    return sortedForwards;
+  };
+
+  // 可拖拽的转发卡片组件
+  const SortableForwardCard = ({ forward }: { forward: Forward }) => {
+    // 确保 forward 对象有效
+    if (!forward || !forward.id) {
+      return null;
+    }
+
+    const {
+      attributes,
+      listeners,
+      setNodeRef,
+      transform,
+      transition,
+      isDragging,
+    } = useSortable({ id: forward.id });
+
+    const style = {
+      transform: transform ? CSS.Transform.toString(transform) : undefined,
+      transition: transition || undefined,
+      opacity: isDragging ? 0.5 : 1,
+    };
+
+    return (
+      <div ref={setNodeRef} style={style} {...attributes}>
+        {renderForwardCard(forward, listeners)}
+      </div>
+    );
+  };
+
   // 渲染转发卡片
-  const renderForwardCard = (forward: Forward) => {
+  const renderForwardCard = (forward: Forward, listeners?: any) => {
     const statusDisplay = getStatusDisplay(forward.status);
     const strategyDisplay = getStrategyDisplay(forward.strategy);
     
     return (
-      <Card key={forward.id} className="shadow-sm border border-divider hover:shadow-md transition-shadow duration-200">
+      <Card key={forward.id} className="group shadow-sm border border-divider hover:shadow-md transition-shadow duration-200">
         <CardHeader className="pb-2">
           <div className="flex justify-between items-start w-full">
             <div className="flex-1 min-w-0">
@@ -890,6 +1179,22 @@ export default function ForwardPage() {
               <p className="text-xs text-default-500 truncate">{forward.tunnelName}</p>
             </div>
             <div className="flex items-center gap-1.5 ml-2">
+              {viewMode === 'direct' && (
+                <div 
+                  className={`cursor-grab active:cursor-grabbing p-2 text-default-400 hover:text-default-600 transition-colors touch-manipulation ${
+                    isMobile 
+                      ? 'opacity-100' // 移动端始终显示
+                      : 'opacity-0 group-hover:opacity-100 sm:opacity-0 sm:group-hover:opacity-100'
+                  }`}
+                  {...listeners}
+                  title={isMobile ? "长按拖拽排序" : "拖拽排序"}
+                  style={{ touchAction: 'none' }}
+                >
+                  <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M7 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 2zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 7 14zm6-8a2 2 0 1 1-.001-4.001A2 2 0 0 1 13 6zm0 2a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 8zm0 6a2 2 0 1 1 .001 4.001A2 2 0 0 1 13 14z" />
+                  </svg>
+                </div>
+              )}
               <Switch
                 size="sm"
                 isSelected={forward.serviceRunning}
@@ -1044,7 +1349,9 @@ export default function ForwardPage() {
       <div className="px-3 lg:px-6 py-8">
         {/* 页面头部 */}
         <div className="flex items-center justify-between mb-6">
-          <h1 className="text-2xl font-bold text-foreground">转发管理</h1>
+          <div className="flex-1">
+            <h1 className="text-2xl font-bold text-foreground">转发管理</h1>
+          </div>
           <div className="flex items-center gap-3">
             {/* 显示模式切换按钮 */}
             <Button
@@ -1103,6 +1410,7 @@ export default function ForwardPage() {
           </div>
         </div>
 
+
         {/* 根据显示模式渲染不同内容 */}
         {viewMode === 'grouped' ? (
           /* 按用户和隧道分组的转发列表 */
@@ -1160,7 +1468,7 @@ export default function ForwardPage() {
                           className="shadow-none border border-divider"
                         >
                           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4 p-4">
-                            {tunnelGroup.forwards.map((forward) => renderForwardCard(forward))}
+                            {tunnelGroup.forwards.map((forward) => renderForwardCard(forward, undefined))}
                           </div>
                         </AccordionItem>
                       ))}
@@ -1190,9 +1498,25 @@ export default function ForwardPage() {
         ) : (
           /* 直接显示模式 */
           forwards.length > 0 ? (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
-              {forwards.map((forward) => renderForwardCard(forward))}
-            </div>
+            <DndContext
+              sensors={sensors}
+              collisionDetection={closestCenter}
+              onDragEnd={handleDragEnd}
+              onDragStart={() => {}} // 添加空的 onDragStart 处理器
+            >
+              <SortableContext
+                items={getSortedForwards().map(f => f.id || 0).filter(id => id > 0)}
+                strategy={rectSortingStrategy}
+              >
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5 gap-4">
+                  {getSortedForwards().map((forward) => (
+                    forward && forward.id ? (
+                      <SortableForwardCard key={forward.id} forward={forward} />
+                    ) : null
+                  ))}
+                </div>
+              </SortableContext>
+            </DndContext>
           ) : (
             /* 空状态 */
             <Card className="shadow-sm border border-gray-200 dark:border-gray-700">

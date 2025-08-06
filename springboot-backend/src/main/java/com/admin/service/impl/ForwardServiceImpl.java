@@ -147,13 +147,47 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         if (tunnel.getStatus() != TUNNEL_STATUS_ACTIVE) {
             return R.err("隧道已禁用，无法更新转发");
         }
-
+        boolean tunnelChanged = isTunnelChanged(existForward, forwardUpdateDto);
         // 4. 检查权限和限制
         UserPermissionResult permissionResult = null;
-        if (isTunnelChanged(existForward, forwardUpdateDto)) {
-            permissionResult = checkUserPermissions(currentUser, tunnel, forwardUpdateDto.getId());
-            if (permissionResult.isHasError()) {
-                return R.err(permissionResult.getErrorMessage());
+        if (tunnelChanged) {
+            if (currentUser.getRoleId() == ADMIN_ROLE_ID) {
+                // 管理员操作自己的转发时，不需要检查权限限制
+                if (Objects.equals(currentUser.getUserId(), existForward.getUserId())) {
+                    permissionResult = UserPermissionResult.success(null, null);
+                } else {
+                    // 管理员操作用户转发时，需要检查原用户是否有新隧道权限
+                    // 获取原转发用户的信息
+                    User originalUser = userService.getById(existForward.getUserId());
+                    if (originalUser == null) {
+                        return R.err("用户不存在");
+                    }
+                    
+                    // 检查原用户是否有新隧道权限
+                    UserTunnel userTunnel = getUserTunnel(existForward.getUserId(), tunnel.getId().intValue());
+                    if (userTunnel == null) {
+                        return R.err("用户没有该隧道权限");
+                    }
+                    
+                    // 检查隧道权限到期时间
+                    if (userTunnel.getExpTime() != null && userTunnel.getExpTime() <= System.currentTimeMillis()) {
+                        return R.err("用户的该隧道权限已到期");
+                    }
+                    
+                    // 检查原用户的流量和转发数量限制
+                    R quotaCheckResult = checkForwardQuota(existForward.getUserId(), tunnel.getId().intValue(), userTunnel, originalUser, forwardUpdateDto.getId());
+                    if (quotaCheckResult.getCode() != 0) {
+                        return R.err("用户" + quotaCheckResult.getMsg());
+                    }
+                    
+                    permissionResult = UserPermissionResult.success(userTunnel.getSpeedId(), userTunnel);
+                }
+            } else {
+                // 普通用户检查自己的权限
+                permissionResult = checkUserPermissions(currentUser, tunnel, forwardUpdateDto.getId());
+                if (permissionResult.isHasError()) {
+                    return R.err(permissionResult.getErrorMessage());
+                }
             }
         }
         
@@ -181,16 +215,12 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
 
         // 8. 调用Gost服务更新转发
         R gostResult;
-        if (isTunnelChanged(existForward, forwardUpdateDto)) {
+        if (tunnelChanged) {
             // 隧道变化时：先删除原配置，再创建新配置
-            gostResult = updateGostServicesWithTunnelChange(existForward, updatedForward, tunnel,
-                                        permissionResult != null ? permissionResult.getLimiter() : null,
-                                        nodeInfo, userTunnel);
+            gostResult = updateGostServicesWithTunnelChange(existForward, updatedForward, tunnel, permissionResult != null ? permissionResult.getLimiter() : null, nodeInfo, userTunnel);
         } else {
             // 隧道未变化时：直接更新配置
-            gostResult = updateGostServices(updatedForward, tunnel, 
-                                        permissionResult != null ? permissionResult.getLimiter() : null,
-                                        nodeInfo, userTunnel);
+            gostResult = updateGostServices(updatedForward, tunnel,  permissionResult != null ? permissionResult.getLimiter() : null, nodeInfo, userTunnel);
         }
         
         if (gostResult.getCode() != 0) {
@@ -450,6 +480,68 @@ public class ForwardServiceImpl extends ServiceImpl<ForwardMapper, Forward> impl
         diagnosisReport.put("timestamp", System.currentTimeMillis());
 
         return R.ok(diagnosisReport);
+    }
+
+    @Override
+    public R updateForwardOrder(Map<String, Object> params) {
+        try {
+            // 1. 获取当前用户信息
+            UserInfo currentUser = getCurrentUserInfo();
+            
+            // 2. 验证参数
+            if (!params.containsKey("forwards")) {
+                return R.err("缺少forwards参数");
+            }
+            
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> forwardsList = (List<Map<String, Object>>) params.get("forwards");
+            if (forwardsList == null || forwardsList.isEmpty()) {
+                return R.err("forwards参数不能为空");
+            }
+            
+            // 3. 验证用户权限（只能更新自己的转发）
+            if (currentUser.getRoleId() != ADMIN_ROLE_ID) {
+                // 普通用户只能更新自己的转发
+                List<Long> forwardIds = forwardsList.stream()
+                    .map(item -> Long.valueOf(item.get("id").toString()))
+                    .collect(Collectors.toList());
+                
+                // 检查所有转发是否属于当前用户
+                QueryWrapper<Forward> queryWrapper = new QueryWrapper<>();
+                queryWrapper.in("id", forwardIds);
+                queryWrapper.eq("user_id", currentUser.getUserId());
+                
+                long count = this.count(queryWrapper);
+                if (count != forwardIds.size()) {
+                    return R.err("只能更新自己的转发排序");
+                }
+            }
+            
+            // 4. 批量更新排序
+            List<Forward> forwardsToUpdate = new ArrayList<>();
+            for (Map<String, Object> forwardData : forwardsList) {
+                Long id = Long.valueOf(forwardData.get("id").toString());
+                Integer inx = Integer.valueOf(forwardData.get("inx").toString());
+                
+                Forward forward = new Forward();
+                forward.setId(id);
+                forward.setInx(inx);
+                forwardsToUpdate.add(forward);
+            }
+            
+            // 5. 执行批量更新
+            boolean success = this.updateBatchById(forwardsToUpdate);
+            if (success) {
+                log.info("用户 {} 更新了 {} 个转发的排序", currentUser.getUserName(), forwardsToUpdate.size());
+                return R.ok("排序更新成功");
+            } else {
+                return R.err("排序更新失败");
+            }
+            
+        } catch (Exception e) {
+            log.error("更新转发排序失败", e);
+            return R.err("更新排序时发生错误: " + e.getMessage());
+        }
     }
 
     /**

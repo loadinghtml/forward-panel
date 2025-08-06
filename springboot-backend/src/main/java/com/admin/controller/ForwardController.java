@@ -4,7 +4,6 @@ import com.admin.common.aop.LogAnnotation;
 import com.admin.common.annotation.RequireRole;
 import com.admin.common.dto.ForwardDto;
 import com.admin.common.dto.ForwardUpdateDto;
-import com.admin.common.dto.PageDto;
 import com.admin.common.lang.R;
 import com.admin.service.ForwardService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -85,6 +84,17 @@ public class ForwardController extends BaseController {
     public R diagnoseForward(@RequestBody Map<String, Object> params) {
         Long forwardId = Long.valueOf(params.get("forwardId").toString());
         return forwardService.diagnoseForward(forwardId);
+    }
+
+    /**
+     * 更新转发排序
+     * @param params 包含forwards数组的参数，每个元素包含id和inx
+     * @return 更新结果
+     */
+    @LogAnnotation
+    @PostMapping("/update-order")
+    public R updateForwardOrder(@RequestBody Map<String, Object> params) {
+        return forwardService.updateForwardOrder(params);
     }
 
 }
