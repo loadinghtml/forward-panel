@@ -80,6 +80,13 @@ curl -L https://raw.githubusercontent.com/loadinghtml/forward-panel/refs/heads/m
 
 
 
+### 节点端更新
+'''bash
+curl -L https://raw.githubusercontent.com/loadinghtml/forward-panel/refs/heads/main/install.sh -o install.sh && chmod +x install.sh && ./install.sh
+
+'''
+
+
 
 #### 默认管理员账号
 
