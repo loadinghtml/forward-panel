@@ -346,7 +346,6 @@ func ParseService(cfg *config.ServiceConfig) (service.Service, error) {
 		handlerLogger.Error("init: ", err)
 		return nil, err
 	}
-
 	var observer observer.Observer
 	// 如果服务名以_tls结尾，则不启用观察器
 	if strings.HasSuffix(cfg.Name, "_tls") {

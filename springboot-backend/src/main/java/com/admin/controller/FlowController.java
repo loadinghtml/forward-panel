@@ -143,26 +143,19 @@ public class FlowController extends BaseController {
             return SUCCESS_RESPONSE;
         }
 
-        try {
-            // 2. 尝试解密数据
-            String decryptedData = decryptIfNeeded(rawData, secret);
+        // 2. 尝试解密数据
+        String decryptedData = decryptIfNeeded(rawData, secret);
 
-            // 3. 解析为FlowDto列表
-            FlowDto flowDataList = JSONObject.parseObject(decryptedData, FlowDto.class);
-            if (Objects.equals(flowDataList.getN(), "web_api")) {
-                return SUCCESS_RESPONSE;
-            }
-
-            // 记录日志
-            log.debug("🔓 节点流量数据接收成功{}", isEncryptedMessage(rawData) ? "（已解密）" : "");
-
-            // 4. 处理流量数据
-            return processFlowData(flowDataList);
-
-        } catch (Exception e) {
-            log.error("处理流量数据失败: {}", e.getMessage(), e);
+        // 3. 解析为FlowDto列表
+        FlowDto flowDataList = JSONObject.parseObject(decryptedData, FlowDto.class);
+        if (Objects.equals(flowDataList.getN(), "web_api")) {
             return SUCCESS_RESPONSE;
         }
+
+        // 记录日志
+        log.info("节点上报流量数据{}", flowDataList);
+        // 4. 处理流量数据
+        return processFlowData(flowDataList);
     }
 
     /**
@@ -193,18 +186,17 @@ public class FlowController extends BaseController {
                 // 获取或创建加密器
                 AESCrypto crypto = getOrCreateCrypto(secret);
                 if (crypto == null) {
-                    log.warn("⚠️ 收到加密消息但无法创建解密器，使用原始数据");
+                    log.info("⚠️ 收到加密消息但无法创建解密器，使用原始数据");
                     return rawData;
                 }
 
                 // 解密数据
                 String decryptedData = crypto.decryptString(encryptedMessage.getData());
-                log.debug("🔓 数据解密成功");
                 return decryptedData;
             }
         } catch (Exception e) {
             // 解析失败，可能是非加密格式，直接返回原始数据
-            log.debug("数据未加密或解密失败，使用原始数据: {}", e.getMessage());
+            log.info("数据未加密或解密失败，使用原始数据: {}", e.getMessage());
         }
 
         return rawData;
